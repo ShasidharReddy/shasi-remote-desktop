@@ -1,0 +1,5 @@
+module github.com/ShasidharReddy/shasi-remote-desktop
+
+go 1.21
+
+require github.com/gorilla/websocket v1.5.0
