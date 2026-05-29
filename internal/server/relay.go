@@ -96,6 +96,11 @@ type RelayServer struct {
 	uploadDir string
 	streamCh  chan struct{}
 	streamMu  sync.Mutex
+
+	// Cloud relay connection (nil = LAN-only mode)
+	relayConn   *websocket.Conn
+	relayMu     sync.Mutex
+	relayOnline bool
 }
 
 func NewRelayServer(host, port string) *RelayServer {
@@ -216,23 +221,65 @@ func (s *RelayServer) dispatch(sess *session, msg WsMsg) {
 		log.Printf("Host registered: %s from %s", sess.id, sess.remoteIP)
 
 	case msgViewRequest:
-		// Verify this request is for this machine
+		// Verify this request is for this machine (local mode)
 		if msg.TargetID != "" && msg.TargetID != s.machineID {
-			sess.enqueue(WsMsg{Type: msgError, Err: "Machine ID not found on this host"})
+			// In relay mode — forward to cloud relay so it can route to correct machine
+			s.relayMu.Lock()
+			online := s.relayOnline
+			s.relayMu.Unlock()
+			if online && sess != nil {
+				// Create a virtual proxy session so relay responses come back here
+				proxyKey := "relay:" + sess.id
+				s.mu.Lock()
+				s.sessions[proxyKey] = sess
+				s.mu.Unlock()
+				s.sendToRelay(WsMsg{
+					Type:      msgViewRequest,
+					TargetID:  msg.TargetID,
+					SessionID: sess.id,
+				})
+				sess.enqueue(WsMsg{Type: "relay_routing"}) // ack
+				return
+			}
+			if sess != nil {
+				sess.enqueue(WsMsg{Type: msgError, Err: "Machine ID not found — is the other machine online?"})
+			}
 			return
 		}
-		sess.role = "viewer_pending"
-		log.Printf("View request from %s (%s)", sess.id, sess.remoteIP)
+		if sess != nil {
+			sess.role = "viewer_pending"
+		}
+		log.Printf("View request from %s (%s)", func() string {
+			if sess != nil {
+				return sess.id
+			}
+			return "relay"
+		}(), func() string {
+			if sess != nil {
+				return sess.remoteIP
+			}
+			return "relay"
+		}())
+		fromSID := ""
+		fromIP := ""
+		if sess != nil {
+			fromSID = sess.id
+			fromIP = sess.remoteIP
+		} else {
+			fromSID = msg.SessionID
+			fromIP = "relay"
+		}
 		s.broadcastToHosts(WsMsg{
 			Type:       msgIncomingRequest,
-			SessionID:  sess.id,
-			ForSession: sess.id,
-			FromIP:     sess.remoteIP,
+			SessionID:  fromSID,
+			ForSession: fromSID,
+			FromIP:     fromIP,
 		})
 
 	case msgAccept:
+		forSID := msg.ForSession
 		s.mu.RLock()
-		target, ok := s.sessions[msg.ForSession]
+		target, ok := s.sessions[forSID]
 		s.mu.RUnlock()
 		if ok {
 			target.role = "viewer"
@@ -240,15 +287,23 @@ func (s *RelayServer) dispatch(sess *session, msg WsMsg) {
 			log.Printf("Accepted viewer: %s", target.id)
 			s.startScreenStream()
 			s.broadcastToHosts(WsMsg{Type: msgHostStatus, Count: s.viewerCount()})
+		} else {
+			// Viewer is on the relay — forward accept through relay
+			s.sendToRelay(WsMsg{Type: msgAccept, ForSession: forSID})
+			// Start streaming to relay
+			s.startRelayStream(forSID)
 		}
 
 	case msgDeny:
+		forSID := msg.ForSession
 		s.mu.RLock()
-		target, ok := s.sessions[msg.ForSession]
+		target, ok := s.sessions[forSID]
 		s.mu.RUnlock()
 		if ok {
 			target.role = "denied"
 			target.enqueue(WsMsg{Type: msgDenied})
+		} else {
+			s.sendToRelay(WsMsg{Type: msgDeny, ForSession: forSID})
 		}
 
 	case msgInput:
@@ -310,7 +365,7 @@ func (s *RelayServer) streamLoop(quit chan struct{}) {
 		case <-quit:
 			return
 		case <-ticker.C:
-			if s.viewerCount() == 0 {
+			if s.viewerCount() == 0 && !s.relayOnline {
 				s.stopScreenStream()
 				return
 			}
@@ -318,12 +373,11 @@ func (s *RelayServer) streamLoop(quit chan struct{}) {
 			if err != nil {
 				continue
 			}
-			s.broadcastToViewers(WsMsg{
-				Type:   msgScreenFrame,
-				Width:  w,
-				Height: h,
-				Data:   b64,
-			})
+			frame := WsMsg{Type: msgScreenFrame, Width: w, Height: h, Data: b64}
+			// Send to local browser viewers
+			s.broadcastToViewers(frame)
+			// Also send to relay (for remote viewers connected via cloud)
+			s.sendToRelay(frame)
 		}
 	}
 }
@@ -444,3 +498,115 @@ func getLANIP() string {
 	}
 	return "localhost"
 }
+
+// ─── cloud relay client ───────────────────────────────────────────────────────
+// ConnectRelay connects to the cloud relay server and keeps the connection alive.
+// It registers this machine's ID so remote viewers can find us.
+// All viewer messages from the relay are forwarded to local browser sessions.
+
+func (s *RelayServer) ConnectRelay(relayURL string) {
+	backoff := 2
+	for {
+		log.Printf("Connecting to relay: %s", relayURL)
+		conn, _, err := websocket.DefaultDialer.Dial(relayURL, nil)
+		if err != nil {
+			log.Printf("Relay connection failed: %v — retrying in %ds", err, backoff)
+			time.Sleep(time.Duration(backoff) * time.Second)
+			if backoff < 60 {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = 2
+		s.relayMu.Lock()
+		s.relayConn = conn
+		s.relayOnline = true
+		s.relayMu.Unlock()
+		log.Printf("Relay connected ✓  machine-id=%s", s.machineID)
+
+		// Register this machine with the relay
+		s.sendToRelay(WsMsg{Type: "register", MachineID: s.machineID})
+
+		// Broadcast relay status to local browser sessions
+		s.broadcastToHosts(WsMsg{Type: "relay_status", Data: "online"})
+
+		// Read messages from relay and forward to local browser
+		s.relayReadLoop(conn)
+
+		s.relayMu.Lock()
+		s.relayConn = nil
+		s.relayOnline = false
+		s.relayMu.Unlock()
+
+		s.broadcastToHosts(WsMsg{Type: "relay_status", Data: "offline"})
+		log.Printf("Relay disconnected — reconnecting in %ds", backoff)
+		time.Sleep(time.Duration(backoff) * time.Second)
+	}
+}
+
+// relayReadLoop handles messages coming FROM the cloud relay.
+func (s *RelayServer) relayReadLoop(conn *websocket.Conn) {
+	conn.SetReadLimit(64 * 1024 * 1024)
+	for {
+		var msg WsMsg
+		if err := conn.ReadJSON(&msg); err != nil {
+			log.Printf("Relay read error: %v", err)
+			return
+		}
+		switch msg.Type {
+		case "relay_welcome", "registered":
+			// Relay confirmed our registration — nothing to do
+
+		case "incoming_request":
+			// A remote viewer wants to connect — tell local browser host sessions
+			s.broadcastToHosts(msg)
+
+		case "connected":
+			// Relay-initiated viewer got accepted — forward to that viewer's local proxy session
+			s.forwardToRelayViewer(msg.SessionID, msg)
+
+		case "denied":
+			s.forwardToRelayViewer(msg.SessionID, msg)
+
+		case "screen_frame", "host_status":
+			// Viewer on relay side receives screen — forward to their local browser
+			s.forwardToRelayViewer(msg.SessionID, msg)
+
+		case "input", "file_start", "file_chunk", "file_end":
+			// Remote viewer sending input/files — execute locally
+			s.dispatch(nil, msg)
+
+		case "error":
+			log.Printf("Relay error: %s", msg.Err)
+		}
+	}
+}
+
+// startRelayStream starts screen capture that sends frames to the cloud relay.
+func (s *RelayServer) startRelayStream(viewerSessionID string) {
+	s.startScreenStream() // reuses same stream loop — broadcastToViewers + relay
+}
+
+func (s *RelayServer) sendToRelay(msg WsMsg) {
+	s.relayMu.Lock()
+	conn := s.relayConn
+	s.relayMu.Unlock()
+	if conn == nil {
+		return
+	}
+	if err := conn.WriteJSON(msg); err != nil {
+		log.Printf("Relay send error: %v", err)
+	}
+}
+
+// forwardToRelayViewer finds the local proxy session for a relay-viewer and sends them msg.
+// When a viewer connects via cloud relay, we create a virtual proxy session for them.
+func (s *RelayServer) forwardToRelayViewer(viewerSessionID string, msg WsMsg) {
+	s.mu.RLock()
+	sess, ok := s.sessions["relay:"+viewerSessionID]
+	s.mu.RUnlock()
+	if ok {
+		sess.enqueue(msg)
+	}
+}
+

@@ -3,7 +3,25 @@
 'use strict';
 
 // Local WS = this machine's relay server (host role: receive incoming requests)
-const ws = new WebSocket(`ws://${location.host}/ws`);
+let ws = null;
+let wsReconnectTimer = null;
+
+function connectLocalWS() {
+  if (ws && ws.readyState <= WebSocket.OPEN) return;
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen  = () => { setDot('conn-dot', 'online'); clearTimeout(wsReconnectTimer); };
+  ws.onclose = () => {
+    setDot('conn-dot', 'offline');
+    setStatus('Reconnecting…', 'offline');
+    wsReconnectTimer = setTimeout(connectLocalWS, 2000);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    handleLocal(msg);
+  };
+}
+connectLocalWS();
 
 // Remote WS = the other machine's relay server (viewer role: request screen)
 let remoteWs     = null;
@@ -20,27 +38,26 @@ let lastFpsTs  = Date.now();
 
 /* ─── Local WebSocket (this machine as HOST) ───────────────────────────────── */
 
-ws.onopen = () => setDot('conn-dot', 'online');
-
-ws.onclose = () => {
-  setDot('conn-dot', 'offline');
-  setStatus('Disconnected — reload to reconnect', 'offline');
-};
-
-ws.onerror = () => setStatus('WebSocket error', 'offline');
-
-ws.onmessage = (ev) => {
-  let msg;
-  try { msg = JSON.parse(ev.data); } catch { return; }
-  handleLocal(msg);
-};
-
 function send(obj) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
 function handleLocal(msg) {
   switch (msg.type) {
+
+    case 'relay_status':
+      if (msg.data === 'online') {
+        setDot('relay-dot', 'online');
+        setRelayHint('☁ Connected — share your ID only (no @IP needed)');
+      } else {
+        setDot('relay-dot', 'offline');
+        setRelayHint('⚠ Relay offline — use ID@IP:PORT for LAN');
+      }
+      break;
+
+    case 'relay_routing':
+      setConnStatus('⏳ Routing through relay…');
+      break;
 
     case 'welcome':
       sessionID  = msg.session_id;
@@ -672,11 +689,16 @@ function showModal(on) {
   document.getElementById('modal').classList.toggle('hidden', !on);
 }
 
+function setRelayHint(txt) {
+  const el = document.getElementById('relay-hint');
+  if (el) el.textContent = txt;
+}
+
 let toastTimer;
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 4000);
 }

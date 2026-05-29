@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: secure-system-relay
+    env: go
+    buildCommand: "cd relay-server && go build -o ../relay-server-bin ."
+    startCommand: "./relay-server-bin"
+    envVars:
+      - key: PORT
+        value: 9090
+    plan: free

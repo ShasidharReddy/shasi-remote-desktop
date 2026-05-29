@@ -296,3 +296,9 @@ body {
   .home-grid { grid-template-columns: 1fr; }
   .file-card { margin: 0 16px 16px; width: calc(100% - 32px); }
 }
+
+/* ─── relay status ────────────────────────────────────────────────────────────── */
+.relay-row  { display:flex; align-items:center; gap:6px; margin-top:8px; }
+.relay-label{ font-size:12px; color:var(--muted); }
+.relay-hint { font-size:12px; color:var(--muted); margin-top:4px; }
+.dot-waiting{ background:#f59e0b; }
