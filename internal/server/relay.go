@@ -6,17 +6,17 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gorilla/websocket"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
+	"github.com/gorilla/websocket"
 )
 
 type Client struct {
-	AgentID  string
-	Role     string
-	Conn     *websocket.Conn
-	Send     chan interface{}
-	Peer     *Client
-	mu       sync.Mutex
+	AgentID string
+	Role    string
+	Conn    *websocket.Conn
+	Send    chan interface{}
+	Peer    *Client
+	mu      sync.Mutex
 }
 
 type RelayServer struct {
@@ -49,35 +49,35 @@ func (s *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Upgrade error: %v", err)
 		return
 	}
-	defer conn.Close()
 
 	client := &Client{
 		Conn: conn,
 		Send: make(chan interface{}, 100),
 	}
 
-	// Read register message
 	var msg protocol.Message
 	if err := conn.ReadJSON(&msg); err != nil {
 		log.Printf("Read error: %v", err)
+		conn.Close()
 		return
 	}
 
 	if msg.Type != protocol.TypeRegister {
 		log.Printf("Expected register, got %s", msg.Type)
+		conn.Close()
 		return
 	}
 
 	var regPayload protocol.RegisterPayload
 	if err := json.Unmarshal(msg.Payload, &regPayload); err != nil {
 		log.Printf("Unmarshal error: %v", err)
+		conn.Close()
 		return
 	}
 
 	client.AgentID = regPayload.AgentID
 	client.Role = regPayload.Role
 
-	// Store client
 	s.mu.Lock()
 	key := regPayload.AgentID + ":" + regPayload.Role
 	existing, exists := s.clients[key]
@@ -89,17 +89,16 @@ func (s *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Client registered: %s (%s)", client.AgentID, client.Role)
 
-	// Handle bidirectional messaging
 	go s.writePump(client)
-	s.readPump(s, client)
+	s.readPump(client)
 }
 
-func (s *RelayServer) readPump(srv *RelayServer, client *Client) {
+func (s *RelayServer) readPump(client *Client) {
 	defer func() {
-		srv.mu.Lock()
+		s.mu.Lock()
 		key := client.AgentID + ":" + client.Role
-		delete(srv.clients, key)
-		srv.mu.Unlock()
+		delete(s.clients, key)
+		s.mu.Unlock()
 		close(client.Send)
 		client.Conn.Close()
 		log.Printf("Client disconnected: %s (%s)", client.AgentID, client.Role)
@@ -116,7 +115,6 @@ func (s *RelayServer) readPump(srv *RelayServer, client *Client) {
 
 		msg.AgentID = client.AgentID
 
-		// Route to peer
 		s.mu.RLock()
 		peerRole := "agent"
 		if client.Role == "agent" {
@@ -127,22 +125,34 @@ func (s *RelayServer) readPump(srv *RelayServer, client *Client) {
 		s.mu.RUnlock()
 
 		if exists && peer != nil {
-			select {
-			case peer.Send <- msg:
-			default:
-				log.Printf("Peer send queue full: %s", peerKey)
+			if !safeSend(peer.Send, msg) {
+				log.Printf("Peer send failed: %s", peerKey)
 			}
 		}
 	}
 }
 
-func (srv *RelayServer) writePump(client *Client) {
-	defer client.Conn.Close()
+func (s *RelayServer) writePump(client *Client) {
 	for msg := range client.Send {
 		if err := client.Conn.WriteJSON(msg); err != nil {
 			log.Printf("Write error: %v", err)
 			return
 		}
+	}
+}
+
+func safeSend(ch chan interface{}, msg interface{}) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
 	}
 }
 

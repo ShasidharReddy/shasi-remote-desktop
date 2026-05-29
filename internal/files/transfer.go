@@ -2,17 +2,20 @@ package files
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 )
 
 type FileTransferManager struct {
-	DownloadDir    string
+	DownloadDir     string
 	ActiveTransfers map[string]*Transfer
+	mu              sync.Mutex
 }
 
 type Transfer struct {
@@ -24,7 +27,7 @@ type Transfer struct {
 }
 
 func NewFileTransferManager(downloadDir string) *FileTransferManager {
-	os.MkdirAll(downloadDir, 0755)
+	os.MkdirAll(downloadDir, 0o755)
 	return &FileTransferManager{
 		DownloadDir:     downloadDir,
 		ActiveTransfers: make(map[string]*Transfer),
@@ -47,12 +50,23 @@ func (fm *FileTransferManager) StartTransfer(payload *protocol.FileTransferPaylo
 		Received: 0,
 	}
 
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if existing, exists := fm.ActiveTransfers[payload.FileID]; exists {
+		if existing.File != nil {
+			existing.File.Close()
+			os.Remove(existing.File.Name())
+		}
+	}
 	fm.ActiveTransfers[payload.FileID] = transfer
 	log.Printf("Started file transfer: %s (ID: %s, Size: %d bytes)", payload.FileName, payload.FileID, payload.FileSize)
 	return nil
 }
 
 func (fm *FileTransferManager) ReceiveChunk(payload *protocol.FileChunkPayload) error {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
 	transfer, exists := fm.ActiveTransfers[payload.FileID]
 	if !exists {
 		return fmt.Errorf("transfer not found: %s", payload.FileID)
@@ -63,16 +77,21 @@ func (fm *FileTransferManager) ReceiveChunk(payload *protocol.FileChunkPayload) 
 	}
 
 	transfer.Received += int64(len(payload.Data))
-	percentage := (transfer.Received * 100) / transfer.FileSize
-	if percentage%10 == 0 {
-		log.Printf("File transfer progress: %s - %d%% (%d/%d bytes)", 
-			transfer.FileName, percentage, transfer.Received, transfer.FileSize)
+	if transfer.FileSize > 0 {
+		percentage := (transfer.Received * 100) / transfer.FileSize
+		if percentage%10 == 0 {
+			log.Printf("File transfer progress: %s - %d%% (%d/%d bytes)",
+				transfer.FileName, percentage, transfer.Received, transfer.FileSize)
+		}
 	}
 
 	return nil
 }
 
 func (fm *FileTransferManager) EndTransfer(payload *protocol.FileEndPayload) error {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
 	transfer, exists := fm.ActiveTransfers[payload.FileID]
 	if !exists {
 		return fmt.Errorf("transfer not found: %s", payload.FileID)
@@ -92,22 +111,43 @@ func (fm *FileTransferManager) EndTransfer(payload *protocol.FileEndPayload) err
 	return fmt.Errorf("transfer failed for %s", transfer.FileName)
 }
 
-func (fm *FileTransferManager) SendFile(filePath string) ([]*protocol.FileChunkPayload, error) {
+func (fm *FileTransferManager) CleanupStaleTransfers() {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	for fileID, transfer := range fm.ActiveTransfers {
+		if transfer.File != nil {
+			transfer.File.Close()
+			os.Remove(transfer.File.Name())
+		}
+		delete(fm.ActiveTransfers, fileID)
+		log.Printf("Cleaned up stale transfer: %s", transfer.FileName)
+	}
+}
+
+func (fm *FileTransferManager) SendFile(filePath string) (*protocol.FileTransferPayload, []*protocol.FileChunkPayload, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("open file error: %w", err)
+		return nil, nil, fmt.Errorf("open file error: %w", err)
 	}
 	defer file.Close()
 
 	stat, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat error: %w", err)
+		return nil, nil, fmt.Errorf("stat error: %w", err)
 	}
 
-	chunkSize := 64 * 1024 // 64KB chunks
-	data, err := ioutil.ReadAll(file)
+	chunkSize := 64 * 1024
+	data, err := io.ReadAll(file)
 	if err != nil {
-		return nil, fmt.Errorf("read error: %w", err)
+		return nil, nil, fmt.Errorf("read error: %w", err)
+	}
+
+	fileID := fmt.Sprintf("%s_%d", stat.Name(), time.Now().UnixNano())
+	transfer := &protocol.FileTransferPayload{
+		FileName: stat.Name(),
+		FileSize: stat.Size(),
+		FileID:   fileID,
 	}
 
 	var chunks []*protocol.FileChunkPayload
@@ -118,7 +158,7 @@ func (fm *FileTransferManager) SendFile(filePath string) ([]*protocol.FileChunkP
 		}
 
 		chunk := &protocol.FileChunkPayload{
-			FileID: stat.Name(),
+			FileID: fileID,
 			Offset: offset,
 			Data:   data[offset:end],
 		}
@@ -126,5 +166,5 @@ func (fm *FileTransferManager) SendFile(filePath string) ([]*protocol.FileChunkP
 	}
 
 	log.Printf("Prepared file transfer: %s (%d chunks)", filePath, len(chunks))
-	return chunks, nil
+	return transfer, chunks, nil
 }

@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
-	"log"
 
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 )
@@ -27,14 +26,8 @@ func NewScreenCapture(fps, quality int) *ScreenCapture {
 }
 
 func (sc *ScreenCapture) CaptureFrame() (*protocol.ScreenFramePayload, error) {
-	// Stub implementation - in production would use platform-specific libraries
-	// On macOS: CoreGraphics
-	// On Windows: DXGI or GDI
-	// On Linux: X11
-
 	img := createPlaceholderImage(1920, 1080)
 
-	// Compress to JPEG
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: sc.Quality}); err != nil {
 		return nil, fmt.Errorf("encode error: %w", err)
@@ -49,7 +42,6 @@ func (sc *ScreenCapture) CaptureFrame() (*protocol.ScreenFramePayload, error) {
 	sc.LastWidth = payload.Width
 	sc.LastHeight = payload.Height
 
-	log.Printf("[Screen] Captured %dx%d frame (%d bytes)", payload.Width, payload.Height, len(payload.Data))
 	return payload, nil
 }
 
@@ -61,13 +53,10 @@ func (sc *ScreenCapture) FrameToJSON(frame *protocol.ScreenFramePayload) (json.R
 	return json.Marshal(frame)
 }
 
-// createPlaceholderImage creates a simple placeholder image for testing
 func createPlaceholderImage(width, height int) image.Image {
-	// In production, this would be actual screen capture
 	bounds := image.Rect(0, 0, width, height)
 	img := image.NewRGBA(bounds)
 
-	// Fill with blue color
 	blue := color.RGBA{R: 0, G: 0, B: 255, A: 255}
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
@@ -77,13 +66,3 @@ func createPlaceholderImage(width, height int) image.Image {
 
 	return img
 }
-
-// Note: For production, install these libraries:
-// macOS: brew install coreutils
-// Windows: Install Visual Studio Build Tools
-// Linux: sudo apt-get install libx11-dev libxtst-dev
-//
-// Then use these imports:
-// github.com/kbinani/screenshot - for cross-platform screen capture
-// github.com/robotn/gohook - for cross-platform input
-

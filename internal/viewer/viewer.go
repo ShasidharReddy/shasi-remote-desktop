@@ -6,11 +6,16 @@ import (
 	"image"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/screen"
+	"github.com/gorilla/websocket"
 )
 
 type Viewer struct {
@@ -21,6 +26,8 @@ type Viewer struct {
 	CurrentFrame image.Image
 	LastFrame    time.Time
 	QuitChan     chan struct{}
+	writeMu      sync.Mutex
+	closeOnce    sync.Once
 }
 
 func NewViewer(agentID, serverAddr string) *Viewer {
@@ -42,8 +49,8 @@ func (v *Viewer) Connect() error {
 	}
 	v.Conn = conn
 	defer conn.Close()
+	defer v.closeQuitChan()
 
-	// Register as viewer
 	regMsg := protocol.Message{
 		Type: protocol.TypeRegister,
 		Payload: toRawMessage(&protocol.RegisterPayload{
@@ -51,28 +58,23 @@ func (v *Viewer) Connect() error {
 			Role:    "viewer",
 		}),
 	}
-	if err := conn.WriteJSON(regMsg); err != nil {
+	if err := v.writeJSON(regMsg); err != nil {
 		return fmt.Errorf("register error: %w", err)
 	}
 
 	log.Printf("Viewer registered for agent: %s", v.AgentID)
 
-	// Start keepalive
-	go v.keepalive(conn)
-
-	// Start interactive control loop (simple CLI for now)
-	go v.controlLoop(conn)
-
-	// Handle incoming messages
-	v.handleMessages(conn)
+	go v.keepalive()
+	go v.controlLoop()
+	v.handleMessages()
 
 	return nil
 }
 
-func (v *Viewer) handleMessages(conn *websocket.Conn) {
+func (v *Viewer) handleMessages() {
 	for {
 		var msg protocol.Message
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := v.Conn.ReadJSON(&msg); err != nil {
 			log.Printf("Read error: %v", err)
 			return
 		}
@@ -101,7 +103,7 @@ func (v *Viewer) handleMessages(conn *websocket.Conn) {
 	}
 }
 
-func (v *Viewer) keepalive(conn *websocket.Conn) {
+func (v *Viewer) keepalive() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -114,7 +116,7 @@ func (v *Viewer) keepalive(conn *websocket.Conn) {
 				Type:    protocol.TypePing,
 				AgentID: v.AgentID,
 			}
-			if err := conn.WriteJSON(pingMsg); err != nil {
+			if err := v.writeJSON(pingMsg); err != nil {
 				log.Printf("Ping error: %v", err)
 				return
 			}
@@ -122,17 +124,27 @@ func (v *Viewer) keepalive(conn *websocket.Conn) {
 	}
 }
 
-func (v *Viewer) controlLoop(conn *websocket.Conn) {
+func (v *Viewer) controlLoop() {
 	log.Println("Viewer ready. Press 'h' for help, 'q' to quit")
 	log.Println("Send input commands via stdin (format: 'move:x:y', 'click:1', 'key:enter')")
 
 	var cmd string
 	for {
 		fmt.Print("> ")
-		fmt.Scanln(&cmd)
+		if _, err := fmt.Scanln(&cmd); err != nil {
+			log.Printf("Input error: %v", err)
+			v.closeQuitChan()
+			if v.Conn != nil {
+				v.Conn.Close()
+			}
+			return
+		}
 
 		if cmd == "q" {
-			close(v.QuitChan)
+			v.closeQuitChan()
+			if v.Conn != nil {
+				v.Conn.Close()
+			}
 			return
 		}
 		if cmd == "h" {
@@ -140,18 +152,56 @@ func (v *Viewer) controlLoop(conn *websocket.Conn) {
 			continue
 		}
 
-		// Parse simple command format
-		// move:x:y - mouse move
-		// click:button - mouse click (1,2,3)
-		// key:keyname - keyboard key
-		var inputMsg protocol.Message
-		inputMsg.Type = protocol.TypeInput
-		inputMsg.AgentID = v.AgentID
+		parts := strings.SplitN(cmd, ":", 3)
+		var payload protocol.InputPayload
 
-		// Simple parsing (production would use proper parsing)
+		switch parts[0] {
+		case "move":
+			if len(parts) != 3 {
+				fmt.Printf("Invalid move command: %s\n", cmd)
+				continue
+			}
+			x, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Printf("Invalid X coordinate: %s\n", parts[1])
+				continue
+			}
+			y, err := strconv.Atoi(parts[2])
+			if err != nil {
+				fmt.Printf("Invalid Y coordinate: %s\n", parts[2])
+				continue
+			}
+			payload = protocol.InputPayload{Type: "mouse_move", X: x, Y: y}
+		case "click":
+			if len(parts) != 2 {
+				fmt.Printf("Invalid click command: %s\n", cmd)
+				continue
+			}
+			button, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Printf("Invalid button: %s\n", parts[1])
+				continue
+			}
+			payload = protocol.InputPayload{Type: "mouse_click", Button: button}
+		case "key":
+			if len(parts) != 2 {
+				fmt.Printf("Invalid key command: %s\n", cmd)
+				continue
+			}
+			payload = protocol.InputPayload{Type: "key_press", Key: parts[1]}
+		default:
+			fmt.Printf("Unknown command: %s\n", cmd)
+			continue
+		}
+
+		inputMsg := protocol.Message{
+			Type:    protocol.TypeInput,
+			AgentID: v.AgentID,
+			Payload: toRawMessage(&payload),
+		}
+
 		log.Printf("Command: %s", cmd)
-
-		if err := conn.WriteJSON(inputMsg); err != nil {
+		if err := v.writeJSON(inputMsg); err != nil {
 			log.Printf("Send error: %v", err)
 		}
 	}
@@ -163,20 +213,40 @@ func (v *Viewer) SendInput(inputPayload *protocol.InputPayload) error {
 		AgentID: v.AgentID,
 		Payload: toRawMessage(inputPayload),
 	}
-	return v.Conn.WriteJSON(msg)
+	return v.writeJSON(msg)
 }
 
 func (v *Viewer) SendFileTransfer(filePath string) error {
+	stat, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("stat error: %w", err)
+	}
+
 	msg := protocol.Message{
 		Type:    protocol.TypeFileTransfer,
 		AgentID: v.AgentID,
 		Payload: toRawMessage(&protocol.FileTransferPayload{
-			FileName: filePath,
-			FileSize: 0,
-			FileID:   fmt.Sprintf("file_%d", time.Now().UnixNano()),
+			FileName: filepath.Base(filePath),
+			FileSize: stat.Size(),
+			FileID:   fmt.Sprintf("%s_%d", filepath.Base(filePath), time.Now().UnixNano()),
 		}),
 	}
+	return v.writeJSON(msg)
+}
+
+func (v *Viewer) writeJSON(msg interface{}) error {
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
 	return v.Conn.WriteJSON(msg)
+}
+
+func (v *Viewer) closeQuitChan() {
+	if v.QuitChan == nil {
+		return
+	}
+	v.closeOnce.Do(func() {
+		close(v.QuitChan)
+	})
 }
 
 func (v *Viewer) printHelp() {

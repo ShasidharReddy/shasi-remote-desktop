@@ -7,13 +7,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/files"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/input"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/screen"
+	"github.com/gorilla/websocket"
 )
 
 type Agent struct {
@@ -25,12 +26,14 @@ type Agent struct {
 	FileManager     *files.FileTransferManager
 	FrameTicker     *time.Ticker
 	QuitChan        chan struct{}
+	writeMu         sync.Mutex
+	closeOnce       sync.Once
 }
 
 func NewAgent(agentID, serverAddr string) *Agent {
 	homeDir, _ := os.UserHomeDir()
 	uploadDir := filepath.Join(homeDir, ".shasi-remote", "uploads")
-	os.MkdirAll(uploadDir, 0755)
+	os.MkdirAll(uploadDir, 0o755)
 
 	return &Agent{
 		AgentID:         agentID,
@@ -52,8 +55,8 @@ func (a *Agent) Connect() error {
 	}
 	a.Conn = conn
 	defer conn.Close()
+	defer a.FileManager.CleanupStaleTransfers()
 
-	// Register as agent
 	regMsg := protocol.Message{
 		Type: protocol.TypeRegister,
 		Payload: toRawMessage(&protocol.RegisterPayload{
@@ -61,16 +64,13 @@ func (a *Agent) Connect() error {
 			Role:    "agent",
 		}),
 	}
-	if err := conn.WriteJSON(regMsg); err != nil {
+	if err := a.writeJSON(regMsg); err != nil {
 		return fmt.Errorf("register error: %w", err)
 	}
 
 	log.Printf("Agent registered: %s", a.AgentID)
 
-	// Start screen capture loop
 	go a.captureLoop()
-
-	// Handle incoming messages
 	a.handleMessages(conn)
 
 	return nil
@@ -97,7 +97,7 @@ func (a *Agent) captureLoop() {
 				Payload: toRawMessage(frame),
 			}
 
-			if err := a.Conn.WriteJSON(msg); err != nil {
+			if err := a.writeJSON(msg); err != nil {
 				log.Printf("Send frame error: %v", err)
 				return
 			}
@@ -106,6 +106,8 @@ func (a *Agent) captureLoop() {
 }
 
 func (a *Agent) handleMessages(conn *websocket.Conn) {
+	defer a.closeQuitChan()
+
 	for {
 		var msg protocol.Message
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -156,9 +158,27 @@ func (a *Agent) handleMessages(conn *websocket.Conn) {
 
 		case protocol.TypePing:
 			pongMsg := protocol.Message{Type: protocol.TypePong, AgentID: a.AgentID}
-			conn.WriteJSON(pongMsg)
+			if err := a.writeJSON(pongMsg); err != nil {
+				log.Printf("Pong error: %v", err)
+				return
+			}
 		}
 	}
+}
+
+func (a *Agent) writeJSON(msg interface{}) error {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	return a.Conn.WriteJSON(msg)
+}
+
+func (a *Agent) closeQuitChan() {
+	if a.QuitChan == nil {
+		return
+	}
+	a.closeOnce.Do(func() {
+		close(a.QuitChan)
+	})
 }
 
 func toRawMessage(v interface{}) json.RawMessage {
