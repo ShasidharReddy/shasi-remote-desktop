@@ -1,12 +1,13 @@
 # Binaries
 remote-desktop
 remote-desktop.exe
-*.exe
 *.dll
 *.so
 *.dylib
 bin/
-dist/
+
+# Build artifacts (keep dist/ release files, exclude .app bundle dir)
+dist/*.app/
 
 # Dependency directories
 vendor/
@@ -30,7 +31,6 @@ vendor/
 # OS
 Thumbs.db
 
-# built binaries
-dist/
+# built binaries (keep dist/ release files tracked)
 shasi-remote-desktop
 bin/

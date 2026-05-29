@@ -14,13 +14,11 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build all platforms
-    runs-on: ubuntu-latest
-
+  build-mac:
+    name: Build macOS DMG
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: '1.21'
@@ -30,52 +28,165 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME:-${{ github.event.inputs.version }}}" >> $GITHUB_OUTPUT
 
-      - name: Build all platforms
+      - name: Build macOS binaries
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          LDFLAGS="-s -w -X main.Version=$VERSION"
+          mkdir -p dist
+
+          echo "Building macOS ARM64..."
+          GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/SecureSystem-arm64 .
+
+          echo "Building macOS Intel..."
+          GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/SecureSystem-intel .
+
+      - name: Create .app bundle and DMG (ARM64)
+        run: |
+          APP="dist/SecureSystem.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/SecureSystem-arm64 "$APP/Contents/MacOS/SecureSystem"
+          chmod +x "$APP/Contents/MacOS/SecureSystem"
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>SecureSystem</string>
+            <key>CFBundleIdentifier</key><string>com.securesystem.app</string>
+            <key>CFBundleName</key><string>Secure System</string>
+            <key>CFBundleDisplayName</key><string>Secure System</string>
+            <key>CFBundleVersion</key><string>1.0.0</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSScreenCaptureUsageDescription</key><string>Secure System needs screen recording for remote desktop sharing.</string>
+          </dict></plist>
+          PLIST
+
+          # Ad-hoc sign (removes "damaged" Gatekeeper error)
+          codesign --deep --force --sign - "$APP"
+
+          # Package as DMG
+          STAGING=$(mktemp -d)
+          cp -r "$APP" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname "Secure System" -srcfolder "$STAGING" -ov -format UDZO dist/SecureSystem-mac-arm64.dmg
+          codesign --force --sign - dist/SecureSystem-mac-arm64.dmg
+          rm -rf "$STAGING" "$APP"
+
+      - name: Create .app bundle and DMG (Intel)
+        run: |
+          APP="dist/SecureSystem-intel.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/SecureSystem-intel "$APP/Contents/MacOS/SecureSystem"
+          chmod +x "$APP/Contents/MacOS/SecureSystem"
+          cp dist/SecureSystem.app/Contents/Info.plist "$APP/Contents/Info.plist" 2>/dev/null || \
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>SecureSystem</string>
+            <key>CFBundleIdentifier</key><string>com.securesystem.app</string>
+            <key>CFBundleName</key><string>Secure System</string>
+            <key>CFBundleDisplayName</key><string>Secure System</string>
+            <key>CFBundleVersion</key><string>1.0.0</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --deep --force --sign - "$APP"
+          STAGING=$(mktemp -d)
+          cp -r "$APP" "$STAGING/SecureSystem.app"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname "Secure System" -srcfolder "$STAGING" -ov -format UDZO dist/SecureSystem-mac-intel.dmg
+          codesign --force --sign - dist/SecureSystem-mac-intel.dmg
+          rm -rf "$STAGING" "$APP"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/*.dmg
+
+  build-win-linux:
+    name: Build Windows & Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Set version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME:-${{ github.event.inputs.version }}}" >> $GITHUB_OUTPUT
+
+      - name: Build Windows & Linux
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           LDFLAGS="-s -w -X main.Version=$VERSION"
           WIN_LDFLAGS="-s -w -H windowsgui -X main.Version=$VERSION"
           mkdir -p dist
 
-          echo "Building macOS (ARM64)…"
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-mac-arm64"       .
+          echo "Building Windows x64..."
+          GOOS=windows GOARCH=amd64 go build -ldflags="$WIN_LDFLAGS" -o dist/SecureSystem-windows-x64.exe .
 
-          echo "Building macOS (Intel)…"
-          GOOS=darwin  GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-mac-intel"      .
+          echo "Building Linux x64..."
+          GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/SecureSystem-linux-x64 .
 
-          echo "Building Windows x64…"
-          GOOS=windows GOARCH=amd64 go build -ldflags="$WIN_LDFLAGS" -o "dist/SecureSystem-windows-x64.exe" .
-
-          echo "Building Linux x64…"
-          GOOS=linux   GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-linux-x64"      .
-
-          echo "Building Linux ARM64…"
-          GOOS=linux   GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-linux-arm64"    .
+          echo "Building Linux ARM64..."
+          GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/SecureSystem-linux-arm64 .
 
           ls -lh dist/
+
+      - name: Upload Windows & Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-linux-dist
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: [build-mac, build-win-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh all-dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Secure System ${{ steps.version.outputs.VERSION }}"
+          name: "Secure System ${{ github.ref_name }}"
           body: |
             ## 🔒 Secure System — Remote Desktop
 
             ### Download the right file for your OS:
 
-            | Platform | File |
-            |----------|------|
-            | 🍎 macOS Apple Silicon (M1/M2/M3) | `SecureSystem-mac-arm64` |
-            | 🍎 macOS Intel | `SecureSystem-mac-intel` |
-            | 🪟 Windows 64-bit | `SecureSystem-windows-x64.exe` |
-            | 🐧 Linux x64 | `SecureSystem-linux-x64` |
-            | 🐧 Linux ARM64 | `SecureSystem-linux-arm64` |
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | 🍎 macOS Apple Silicon (M1/M2/M3) | `SecureSystem-mac-arm64.dmg` | Double-click → drag to Applications |
+            | 🍎 macOS Intel | `SecureSystem-mac-intel.dmg` | Double-click → drag to Applications |
+            | 🪟 Windows 64-bit | `SecureSystem-windows-x64.exe` | Double-click to run |
+            | 🐧 Linux x64 | `SecureSystem-linux-x64` | `chmod +x` then run |
+            | 🐧 Linux ARM64 | `SecureSystem-linux-arm64` | `chmod +x` then run |
+
+            ### macOS first-run (if blocked by Gatekeeper)
+            Right-click the app → **Open** → click **Open** in the dialog.
+            Or run once: `xattr -cr /Applications/SecureSystem.app`
 
             ### Quick Start
-            1. Download your OS binary
-            2. **macOS/Linux**: `chmod +x SecureSystem-*` then double-click or run
-            3. **Windows**: double-click `SecureSystem-windows-x64.exe`
+            1. Download your OS file
+            2. **macOS**: open DMG → drag **Secure System** to Applications → launch
+            3. **Windows**: double-click the `.exe`
             4. Browser opens automatically → share your Machine ID
-          files: dist/*
+          files: all-dist/*
           draft: false
           prerelease: false
