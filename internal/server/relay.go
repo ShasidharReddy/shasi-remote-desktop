@@ -3,43 +3,115 @@ package server
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
+	"math/rand"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
-	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 	"github.com/gorilla/websocket"
 )
 
 //go:embed web
 var webFS embed.FS
 
-type Client struct {
-	AgentID string
-	Role    string
-	Conn    *websocket.Conn
-	Send    chan interface{}
-	Peer    *Client
-	mu      sync.Mutex
+// ─── message types ────────────────────────────────────────────────────────────
+
+const (
+	msgWelcome         = "welcome"
+	msgRegisterHost    = "register_host"
+	msgViewRequest     = "view_request"
+	msgIncomingRequest = "incoming_request"
+	msgAccept          = "accept"
+	msgDeny            = "deny"
+	msgConnected       = "connected"
+	msgDenied          = "denied"
+	msgScreenFrame     = "screen_frame"
+	msgInput           = "input"
+	msgFileStart       = "file_start"
+	msgFileChunk       = "file_chunk"
+	msgFileEnd         = "file_end"
+	msgDisconnect      = "disconnect"
+	msgHostStatus      = "host_status"
+	msgError           = "error"
+)
+
+type WsMsg struct {
+	Type       string `json:"type"`
+	SessionID  string `json:"session_id,omitempty"`
+	MachineID  string `json:"machine_id,omitempty"`
+	ForSession string `json:"for_session,omitempty"`
+	FromIP     string `json:"from_ip,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Data       string `json:"data,omitempty"`
+	IType      string `json:"itype,omitempty"`
+	X          int    `json:"x,omitempty"`
+	Y          int    `json:"y,omitempty"`
+	Button     int    `json:"button,omitempty"`
+	Key        string `json:"key,omitempty"`
+	FileID     string `json:"file_id,omitempty"`
+	FileName   string `json:"file_name,omitempty"`
+	FileSize   int64  `json:"file_size,omitempty"`
+	Count      int    `json:"count,omitempty"`
+	Err        string `json:"error,omitempty"`
 }
 
-type RelayServer struct {
-	addr    string
-	clients map[string]*Client
-	mu      sync.RWMutex
-	upgrade websocket.Upgrader
+// ─── session ──────────────────────────────────────────────────────────────────
+
+type session struct {
+	id       string
+	conn     *websocket.Conn
+	role     string // "pending" | "host" | "viewer_pending" | "viewer"
+	remoteIP string
+	send     chan WsMsg
+	writeMu  sync.Mutex
 }
 
-func NewRelayServer(addr string) *RelayServer {
-	return &RelayServer{
-		addr:    addr,
-		clients: make(map[string]*Client),
-		upgrade: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
+func (s *session) enqueue(m WsMsg) {
+	select {
+	case s.send <- m:
+	default:
 	}
 }
+
+// ─── relay server ─────────────────────────────────────────────────────────────
+
+type RelayServer struct {
+	host      string
+	port      string
+	machineID string
+	sessions  map[string]*session
+	mu        sync.RWMutex
+	upgrader  websocket.Upgrader
+	cap       *capturer
+	uploadDir string
+	streamCh  chan struct{}
+	streamMu  sync.Mutex
+}
+
+func NewRelayServer(host, port string) *RelayServer {
+	homeDir, _ := os.UserHomeDir()
+	uploadDir := filepath.Join(homeDir, ".shasi-remote", "uploads")
+	os.MkdirAll(uploadDir, 0755)
+
+	return &RelayServer{
+		host:      host,
+		port:      port,
+		machineID: loadOrGenMachineID(),
+		sessions:  make(map[string]*session),
+		upgrader:  websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+		cap:       newCapturer(),
+		uploadDir: uploadDir,
+	}
+}
+
+func (s *RelayServer) MachineID() string { return s.machineID }
 
 func (s *RelayServer) Start() error {
 	subFS, err := fs.Sub(webFS, "web")
@@ -52,140 +124,280 @@ func (s *RelayServer) Start() error {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.Handle("/", http.FileServer(http.FS(subFS)))
 
-	log.Printf("Relay server listening on %s", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	addr := net.JoinHostPort(s.host, s.port)
+	log.Printf("Relay server listening on %s | Machine ID: %s", addr, s.machineID)
+	return http.ListenAndServe(addr, mux)
 }
 
+// ─── websocket handler ────────────────────────────────────────────────────────
+
 func (s *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrade.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Upgrade error: %v", err)
 		return
 	}
 
-	client := &Client{
-		Conn: conn,
-		Send: make(chan interface{}, 100),
+	sess := &session{
+		id:       genID(8),
+		conn:     conn,
+		role:     "pending",
+		remoteIP: r.RemoteAddr,
+		send:     make(chan WsMsg, 512),
 	}
-
-	var msg protocol.Message
-	if err := conn.ReadJSON(&msg); err != nil {
-		log.Printf("Read error: %v", err)
-		conn.Close()
-		return
-	}
-
-	if msg.Type != protocol.TypeRegister {
-		log.Printf("Expected register, got %s", msg.Type)
-		conn.Close()
-		return
-	}
-
-	var regPayload protocol.RegisterPayload
-	if err := json.Unmarshal(msg.Payload, &regPayload); err != nil {
-		log.Printf("Unmarshal error: %v", err)
-		conn.Close()
-		return
-	}
-
-	client.AgentID = regPayload.AgentID
-	client.Role = regPayload.Role
 
 	s.mu.Lock()
-	key := regPayload.AgentID + ":" + regPayload.Role
-	existing, exists := s.clients[key]
-	if exists && existing.Conn != nil {
-		existing.Conn.Close()
-	}
-	s.clients[key] = client
+	s.sessions[sess.id] = sess
 	s.mu.Unlock()
 
-	log.Printf("Client registered: %s (%s)", client.AgentID, client.Role)
+	// greet with machine ID so browser knows which machine it's talking to
+	sess.enqueue(WsMsg{
+		Type:      msgWelcome,
+		SessionID: sess.id,
+		MachineID: s.machineID,
+	})
 
-	go s.writePump(client)
-	s.readPump(client)
+	go s.writePump(sess)
+	s.readPump(sess)
 }
 
-func (s *RelayServer) readPump(client *Client) {
+func (s *RelayServer) readPump(sess *session) {
 	defer func() {
 		s.mu.Lock()
-		key := client.AgentID + ":" + client.Role
-		delete(s.clients, key)
+		delete(s.sessions, sess.id)
 		s.mu.Unlock()
-		close(client.Send)
-		client.Conn.Close()
-		log.Printf("Client disconnected: %s (%s)", client.AgentID, client.Role)
+		close(sess.send)
+		sess.conn.Close()
+
+		if sess.role == "viewer" && s.viewerCount() == 0 {
+			s.stopScreenStream()
+		}
+		s.broadcastToHosts(WsMsg{Type: msgHostStatus, Count: s.viewerCount()})
+		log.Printf("Session gone: %s (%s)", sess.id, sess.role)
 	}()
 
 	for {
-		var msg protocol.Message
-		if err := client.Conn.ReadJSON(&msg); err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-				log.Printf("WebSocket error: %v", err)
+		var msg WsMsg
+		if err := sess.conn.ReadJSON(&msg); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("Read error [%s]: %v", sess.id, err)
 			}
 			return
 		}
+		s.dispatch(sess, msg)
+	}
+}
 
-		msg.AgentID = client.AgentID
+func (s *RelayServer) writePump(sess *session) {
+	defer sess.conn.Close()
+	for msg := range sess.send {
+		sess.writeMu.Lock()
+		err := sess.conn.WriteJSON(msg)
+		sess.writeMu.Unlock()
+		if err != nil {
+			log.Printf("Write error [%s]: %v", sess.id, err)
+			return
+		}
+	}
+}
 
+// ─── message dispatch ─────────────────────────────────────────────────────────
+
+func (s *RelayServer) dispatch(sess *session, msg WsMsg) {
+	switch msg.Type {
+
+	case msgRegisterHost:
+		sess.role = "host"
+		log.Printf("Host registered: %s from %s", sess.id, sess.remoteIP)
+
+	case msgViewRequest:
+		sess.role = "viewer_pending"
+		log.Printf("View request from %s (%s)", sess.id, sess.remoteIP)
+		s.broadcastToHosts(WsMsg{
+			Type:       msgIncomingRequest,
+			SessionID:  sess.id,
+			ForSession: sess.id,
+			FromIP:     sess.remoteIP,
+		})
+
+	case msgAccept:
 		s.mu.RLock()
-		peerRole := "agent"
-		if client.Role == "agent" {
-			peerRole = "viewer"
-		}
-		peerKey := client.AgentID + ":" + peerRole
-		peer, exists := s.clients[peerKey]
+		target, ok := s.sessions[msg.ForSession]
 		s.mu.RUnlock()
-
-		if exists && peer != nil {
-			if !safeSend(peer.Send, msg) {
-				log.Printf("Peer send failed: %s", peerKey)
-			}
+		if ok {
+			target.role = "viewer"
+			target.enqueue(WsMsg{Type: msgConnected})
+			log.Printf("Accepted viewer: %s", target.id)
+			s.startScreenStream()
+			s.broadcastToHosts(WsMsg{Type: msgHostStatus, Count: s.viewerCount()})
 		}
-	}
-}
 
-func (s *RelayServer) writePump(client *Client) {
-	for msg := range client.Send {
-		if err := client.Conn.WriteJSON(msg); err != nil {
-			log.Printf("Write error: %v", err)
+	case msgDeny:
+		s.mu.RLock()
+		target, ok := s.sessions[msg.ForSession]
+		s.mu.RUnlock()
+		if ok {
+			target.role = "denied"
+			target.enqueue(WsMsg{Type: msgDenied})
+		}
+
+	case msgInput:
+		if sess.role != "viewer" {
 			return
 		}
-	}
-}
+		s.cap.executeInput(msg)
 
-func safeSend(ch chan interface{}, msg interface{}) (ok bool) {
-	defer func() {
-		if recover() != nil {
-			ok = false
+	case msgFileStart:
+		s.cap.startFile(msg.FileID, msg.FileName, msg.FileSize, s.uploadDir)
+
+	case msgFileChunk:
+		s.cap.writeChunk(msg.FileID, msg.Data)
+
+	case msgFileEnd:
+		if path := s.cap.finishFile(msg.FileID); path != "" {
+			s.broadcastToHosts(WsMsg{
+				Type:     msgFileEnd,
+				FileID:   msg.FileID,
+				FileName: filepath.Base(path),
+			})
 		}
-	}()
 
-	select {
-	case ch <- msg:
-		return true
-	default:
-		return false
+	case msgDisconnect:
+		sess.role = "pending"
+		s.broadcastToHosts(WsMsg{Type: msgHostStatus, Count: s.viewerCount()})
+		if s.viewerCount() == 0 {
+			s.stopScreenStream()
+		}
 	}
 }
+
+// ─── screen streaming ─────────────────────────────────────────────────────────
+
+func (s *RelayServer) startScreenStream() {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if s.streamCh != nil {
+		return
+	}
+	s.streamCh = make(chan struct{})
+	go s.streamLoop(s.streamCh)
+}
+
+func (s *RelayServer) stopScreenStream() {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if s.streamCh != nil {
+		close(s.streamCh)
+		s.streamCh = nil
+	}
+}
+
+func (s *RelayServer) streamLoop(quit chan struct{}) {
+	ticker := time.NewTicker(100 * time.Millisecond) // ~10 fps
+	defer ticker.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-ticker.C:
+			if s.viewerCount() == 0 {
+				s.stopScreenStream()
+				return
+			}
+			b64, w, h, err := s.cap.capture()
+			if err != nil {
+				continue
+			}
+			s.broadcastToViewers(WsMsg{
+				Type:   msgScreenFrame,
+				Width:  w,
+				Height: h,
+				Data:   b64,
+			})
+		}
+	}
+}
+
+// ─── broadcast helpers ────────────────────────────────────────────────────────
+
+func (s *RelayServer) broadcastToHosts(msg WsMsg) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sess := range s.sessions {
+		if sess.role == "host" {
+			sess.enqueue(msg)
+		}
+	}
+}
+
+func (s *RelayServer) broadcastToViewers(msg WsMsg) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sess := range s.sessions {
+		if sess.role == "viewer" {
+			sess.enqueue(msg)
+		}
+	}
+}
+
+func (s *RelayServer) viewerCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, sess := range s.sessions {
+		if sess.role == "viewer" {
+			n++
+		}
+	}
+	return n
+}
+
+// ─── /status endpoint ────────────────────────────────────────────────────────
 
 func (s *RelayServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	status := map[string]interface{}{
-		"connected_clients": len(s.clients),
-		"clients":           make([]map[string]string, 0),
+	type info struct {
+		ID   string `json:"id"`
+		Role string `json:"role"`
+		IP   string `json:"ip"`
 	}
-
-	for key, client := range s.clients {
-		status["clients"] = append(status["clients"].([]map[string]string), map[string]string{
-			"agent_id": client.AgentID,
-			"role":     client.Role,
-			"key":      key,
-		})
+	list := make([]info, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		list = append(list, info{ID: sess.id, Role: sess.role, IP: sess.remoteIP})
 	}
+	s.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"machine_id": s.machineID,
+		"sessions":   list,
+		"viewers":    s.viewerCount(),
+	})
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+func loadOrGenMachineID() string {
+	homeDir, _ := os.UserHomeDir()
+	idFile := filepath.Join(homeDir, ".shasi-remote", "machine-id")
+	os.MkdirAll(filepath.Dir(idFile), 0755)
+	if data, err := os.ReadFile(idFile); err == nil && len(data) == 11 {
+		return string(data)
+	}
+	id := fmt.Sprintf("%03d-%03d-%03d",
+		rand.Intn(900)+100,
+		rand.Intn(900)+100,
+		rand.Intn(900)+100,
+	)
+	os.WriteFile(idFile, []byte(id), 0644)
+	return id
+}
+
+func genID(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[rand.Intn(len(chars))]
+	}
+	return string(b)
 }
