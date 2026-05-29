@@ -29,3 +29,8 @@ vendor/
 
 # OS
 Thumbs.db
+
+# built binaries
+dist/
+shasi-remote-desktop
+bin/

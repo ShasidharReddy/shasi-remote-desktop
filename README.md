@@ -1,215 +1,209 @@
-# Shasi Remote Desktop
+# 🔒 Secure System — Remote Desktop
 
-A high-performance cross-platform remote desktop application built in Go. Share your screen, control machines remotely, and transfer files seamlessly across Windows, macOS, and Linux.
-
-**Features:**
-- 🖥️ **Screen Sharing** - Real-time screen capture with H.264 compression
-- 🖱️ **Remote Control** - Full mouse and keyboard control
-- 📁 **File Transfer** - Drag-drop file transfer with progress tracking
-- 🔐 **Secure** - WebSocket relay server with client authentication
-- 🚀 **Fast** - High FPS streaming, optimized for low-latency control
-- 💻 **Cross-Platform** - Works on Windows, macOS, and Linux
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  Shasi Remote Desktop                        │
-├──────────────────────┬──────────────────────┬────────────────┤
-│   Agent (Relay)      │    Relay Server      │  Viewer (UI)   │
-│  - Screen Capture    │  - Connection Mgmt   │  - Display     │
-│  - Input Receiver    │  - Message Routing   │  - Input Ctrl  │
-│  - File Access       │  - WebSocket         │  - File Send   │
-└──────────────────────┴──────────────────────┴────────────────┘
-```
-
-## Installation
-
-### Prerequisites
-- Go 1.21+
-- macOS: Xcode Command Line Tools
-- Windows: Visual Studio Build Tools (for CGO)
-- Linux: `libx11-dev`, `libxtst-dev`, `xclip`
-
-### Build from Source
-
-```bash
-git clone https://github.com/ShasidharReddy/shasi-remote-desktop.git
-cd shasi-remote-desktop
-go mod tidy
-go build -o remote-desktop
-```
-
-## Usage
-
-### Start Relay Server (on a central machine)
-```bash
-./remote-desktop -mode server -host 0.0.0.0 -port 8080
-```
-
-Server runs on `http://0.0.0.0:8080/ws` and provides status at `http://0.0.0.0:8080/status`
-
-### Run Agent (on machine to be controlled)
-```bash
-./remote-desktop -mode agent -host <server-ip> -port 8080 -agent-id "my-laptop"
-```
-
-Agent connects to server and shares screen.
-
-### Run Viewer (on control machine)
-```bash
-./remote-desktop -mode viewer -host <server-ip> -port 8080 -agent-id "my-laptop"
-```
-
-Viewer connects and receives screen frames + sends input commands.
-
-## Command-Line Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-mode` | server | Run mode: `server`, `agent`, or `viewer` |
-| `-host` | localhost | Server host/IP |
-| `-port` | 8080 | Server port |
-| `-agent-id` | (required for agent/viewer) | Unique agent identifier |
-
-## Protocol
-
-Communication uses JSON over WebSocket:
-
-```json
-{
-  "type": "screen_frame",
-  "agent_id": "my-laptop",
-  "payload": {
-    "width": 1920,
-    "height": 1080,
-    "data": "<base64-jpeg>"
-  }
-}
-```
-
-Message Types:
-- `register` - Client registration
-- `screen_frame` - Screen capture frame
-- `input` - Mouse/keyboard input
-- `file_transfer` - File transfer start
-- `file_chunk` - File data chunk
-- `file_end` - File transfer complete
-- `ping`/`pong` - Keepalive
-
-## File Structure
-
-```
-.
-├── main.go                    # Entry point
-├── go.mod                     # Go module
-├── README.md                  # This file
-├── Makefile                   # Build automation
-└── internal/
-    ├── protocol/              # Message protocol definitions
-    ├── server/                # Relay server implementation
-    ├── agent/                 # Screen capture + input receiver
-    ├── viewer/                # Display + input sender
-    ├── screen/                # Screen capture module
-    ├── input/                 # Input control module
-    └── files/                 # File transfer module
-```
-
-## Building Releases
-
-### macOS
-```bash
-make build-macos
-# Output: remote-desktop-darwin-arm64 (Apple Silicon)
-```
-
-### Windows
-```bash
-make build-windows
-# Output: remote-desktop-windows-amd64.exe
-```
-
-### Linux
-```bash
-make build-linux
-# Output: remote-desktop-linux-amd64
-```
-
-## Performance
-
-- **Screen FPS**: 15 FPS (configurable)
-- **JPEG Quality**: 80/100 (configurable)
-- **Chunk Size**: 64KB (file transfers)
-- **Input Throttle**: 50ms between inputs
-- **Server Connections**: Unlimited (tested with 1000+)
-
-## Logs
-
-Logs are saved to `~/.shasi-remote/remote-desktop.log`
-
-## Security Notes
-
-- This is a local network tool; use SSH port forwarding or VPN for remote access
-- Relay server does NOT authenticate connections (implement in production)
-- Files are transferred unencrypted; add TLS for production use
-- Consider using iptables/firewall to restrict access
-
-## Troubleshooting
-
-### Screen capture fails on macOS
-- Grant Screen Recording permission: System Preferences → Security & Privacy → Screen Recording
-- Or run with `sudo`
-
-### Input events not working
-- Linux: Requires `Xlib` and `XTest` extensions; may need `sudo`
-- macOS: Grant Accessibility permissions: System Preferences → Security & Privacy → Accessibility
-
-### Slow performance
-- Reduce FPS: Check `screen.NewScreenCapture()` parameters
-- Reduce JPEG quality: Increase compression level
-- Check network latency with `ping`
-
-## Development
-
-### Adding Features
-1. Define new message type in `internal/protocol/message.go`
-2. Implement handler in agent/viewer
-3. Update relay server routing if needed
-
-### Testing
-```bash
-go test ./...
-go test -v ./internal/...
-```
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -am 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
-
-## License
-
-MIT License - See LICENSE file
-
-## Author
-
-Shasidhar Reddy - [@ShasidharReddy](https://github.com/ShasidharReddy)
-
-## Roadmap
-
-- [ ] Web-based viewer (HTML5 Canvas)
-- [ ] Mobile client (iOS/Android)
-- [ ] End-to-end encryption
-- [ ] Audio streaming
-- [ ] Clipboard sync
-- [ ] Multi-monitor support
-- [ ] Session recording
-- [ ] Peer-to-peer direct connection (no relay)
+> AnyDesk-style remote desktop for macOS, Windows, and Linux.  
+> One binary. Double-click. Share your ID. Done.
 
 ---
 
-**Star** ⭐ this repo if you find it useful!
+## ⬇️ Download (Ready-to-Use Binaries)
+
+Go to **[Releases](https://github.com/ShasidharReddy/shasi-remote-desktop/releases/latest)** and download the file for your OS:
+
+| OS | File to Download |
+|---|---|
+| 🍎 macOS Apple Silicon (M1/M2/M3) | `SecureSystem-mac-arm64` |
+| 🍎 macOS Intel | `SecureSystem-mac-intel` |
+| 🪟 Windows 64-bit | `SecureSystem-windows-x64.exe` |
+| 🐧 Linux x64 | `SecureSystem-linux-x64` |
+| 🐧 Linux ARM64 | `SecureSystem-linux-arm64` |
+
+---
+
+## 🚀 Quick Start
+
+### Windows
+1. Download `SecureSystem-windows-x64.exe`
+2. **Double-click** it — browser opens automatically
+3. Your **Machine ID** appears in the browser (e.g. `482-751-293`)
+4. Share your Machine ID with whoever needs to connect
+
+### macOS
+```bash
+# Download, make executable, run
+chmod +x SecureSystem-mac-arm64
+./SecureSystem-mac-arm64
+# Browser opens automatically at http://localhost:8080
+```
+
+> **macOS Security Pop-up?** Right-click → Open → Open Anyway  
+> (or: System Settings → Privacy & Security → Allow)
+
+### Linux
+```bash
+chmod +x SecureSystem-linux-x64
+./SecureSystem-linux-x64
+# Browser opens at http://localhost:8080
+```
+
+---
+
+## 🎯 How It Works (AnyDesk-style)
+
+```
+Person A (HOST)                    Person B (VIEWER)
+─────────────────                  ──────────────────
+1. Run SecureSystem                1. Open http://PersonA-IP:8080
+2. Gets ID: 482-751-293            2. Enter: 482-751-293
+3. Shares ID + IP with B           3. Click "Connect"
+4. Sees "B wants to connect"       4. Waits…
+5. Clicks "✓ Accept"               5. Sees Person A's screen live!
+6. B can now see & control screen  6. Mouse/keyboard sent to Person A
+```
+
+---
+
+## 📡 Network Setup
+
+### Same machine (testing)
+```
+./SecureSystem-mac-arm64
+# Open 2 browser tabs at http://localhost:8080
+# Tab 1 = host, Tab 2 enters the ID and clicks Connect
+```
+
+### Same LAN (home/office network)
+```
+Person A: ./SecureSystem-mac-arm64 --host 0.0.0.0
+Person B: open http://<Person-A-local-IP>:8080
+
+# Find your LAN IP:
+# macOS:   ipconfig getifaddr en0
+# Windows: ipconfig | findstr IPv4
+# Linux:   hostname -I
+```
+
+### Custom port
+```bash
+./SecureSystem-mac-arm64 --port 9090
+# Browser at http://localhost:9090
+```
+
+---
+
+## 📁 File Transfer
+
+1. Open the **File Transfer** section in the browser UI
+2. **Drag & drop** files (or click Browse)
+3. Files are chunked (256KB) and sent to the host machine
+4. Saved to `~/.shasi-remote/uploads/` on the receiving machine
+
+> Supports files up to **5GB+** — chunked streaming, no size limit.
+
+---
+
+## 🖥️ Screen Capture Support
+
+| OS | Method |
+|---|---|
+| macOS | `screencapture` command (built-in) ✅ |
+| Windows | PowerShell + System.Drawing ✅ |
+| Linux | `scrot` or ImageMagick `import` ✅ |
+
+> **macOS**: Grant Screen Recording permission in System Settings → Privacy & Security → Screen Recording
+
+---
+
+## 🔨 Build from Source
+
+### Requirements
+- Go 1.21+
+- `git clone https://github.com/ShasidharReddy/shasi-remote-desktop`
+
+### Build for your OS
+```bash
+cd shasi-remote-desktop
+go build -o SecureSystem .
+./SecureSystem
+```
+
+### Build all platforms
+```bash
+make dist
+# Output in dist/:
+#   SecureSystem-mac-arm64
+#   SecureSystem-mac-intel
+#   SecureSystem-windows-x64.exe
+#   SecureSystem-linux-x64
+#   SecureSystem-linux-arm64
+```
+
+### macOS .app Bundle
+```bash
+make bundle-mac
+# Creates dist/Secure System.app — double-click to run
+```
+
+---
+
+## 🔧 Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Browser doesn't open | Manually go to `http://localhost:8080` |
+| "Operation not permitted" on macOS | Allow Screen Recording in System Settings |
+| Windows shows "Windows protected your PC" | Click "More info" → "Run anyway" |
+| Can't connect from another machine | Check firewall: allow port 8080 TCP |
+| Screen is dark/placeholder | Screen recording permission not granted |
+| Port 8080 in use | Run with `--port 9090` |
+
+### Logs
+```bash
+# All logs at:
+~/.shasi-remote/remote-desktop.log
+
+tail -f ~/.shasi-remote/remote-desktop.log
+```
+
+---
+
+## 📂 Project Structure
+
+```
+shasi-remote-desktop/
+├── main.go                         # Entry point — starts server + opens browser
+├── internal/
+│   ├── server/
+│   │   ├── relay.go                # WebSocket relay, session management
+│   │   ├── capturer.go             # Screen capture + input injection (all OS)
+│   │   └── web/                    # Embedded web UI
+│   │       ├── index.html          # App shell
+│   │       ├── styles.css          # Dark theme styles
+│   │       └── app.js              # WebSocket client, viewer/host logic
+│   ├── agent/                      # CLI agent mode (legacy)
+│   ├── viewer/                     # CLI viewer mode (legacy)
+│   ├── screen/                     # Screen capture utilities
+│   ├── input/                      # Input controller
+│   ├── files/                      # File transfer
+│   └── protocol/                   # Message types
+├── Makefile                        # Cross-platform build
+└── .github/workflows/release.yml  # Auto-release on git tag
+```
+
+---
+
+## 🚢 Release a New Version
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+# GitHub Actions builds all platforms and creates a release automatically
+```
+
+---
+
+## ⚠️ Limitations
+
+- Works best on **LAN** (same network). Cross-internet requires port forwarding.
+- Screen capture FPS: ~10fps (limited by OS screenshot tools)
+- Input injection on macOS requires Accessibility permissions
+

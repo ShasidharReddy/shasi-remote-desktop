@@ -1,81 +1,50 @@
-.PHONY: all build build-macos build-windows build-linux test clean help
+.PHONY: build dist build-mac build-win build-linux clean bundle-mac help
 
+BINARY  := shasi-remote-desktop
 VERSION ?= 1.0.0
-COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
-LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)"
-
-all: clean test build
+LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION)"
+WIN_LDF := -ldflags "-s -w -H windowsgui -X main.Version=$(VERSION)"
 
 help:
-	@echo "Shasi Remote Desktop - Build Commands"
-	@echo ""
-	@echo "Usage: make [target]"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all           - Clean, test, and build all platforms"
-	@echo "  build         - Build native binary (current OS)"
-	@echo "  build-macos   - Build for macOS (ARM64 + x86_64)"
-	@echo "  build-windows - Build for Windows (x86_64)"
-	@echo "  build-linux   - Build for Linux (x86_64)"
-	@echo "  test          - Run tests"
-	@echo "  clean         - Remove build artifacts"
-	@echo "  deps          - Download dependencies"
+	@printf "\n  Secure System  —  Build Commands\n\n"
+	@printf "  make build        Build for current OS\n"
+	@printf "  make dist         Build for ALL platforms (mac/win/linux)\n"
+	@printf "  make bundle-mac   Create macOS .app bundle\n"
+	@printf "  make clean        Remove dist/\n\n"
 
 build:
-	@echo "Building Shasi Remote Desktop..."
-	@go build $(LDFLAGS) -o remote-desktop .
-	@echo "✓ Built: ./remote-desktop"
+	@go build $(LDFLAGS) -o $(BINARY) .
+	@echo "Built: ./$(BINARY)"
 
-build-macos:
-	@echo "Building for macOS..."
-	@mkdir -p bin
-	@GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o bin/remote-desktop-darwin-arm64 .
-	@GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o bin/remote-desktop-darwin-x86_64 .
-	@echo "✓ Built: bin/remote-desktop-darwin-arm64 (Apple Silicon)"
-	@echo "✓ Built: bin/remote-desktop-darwin-x86_64 (Intel)"
+dist: clean build-mac build-win build-linux
+	@echo ""; ls -lh dist/
 
-build-windows:
-	@echo "Building for Windows..."
-	@mkdir -p bin
-	@GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o bin/remote-desktop-windows-amd64.exe .
-	@echo "✓ Built: bin/remote-desktop-windows-amd64.exe"
+build-mac:
+	@mkdir -p dist
+	@GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o "dist/SecureSystem-mac-arm64"      .
+	@GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o "dist/SecureSystem-mac-intel"     .
+	@echo "macOS: dist/SecureSystem-mac-arm64 (Apple Silicon)"
+	@echo "macOS: dist/SecureSystem-mac-intel (Intel)"
+
+build-win:
+	@mkdir -p dist
+	@GOOS=windows GOARCH=amd64 go build $(WIN_LDF) -o "dist/SecureSystem-windows-x64.exe" .
+	@echo "Windows: dist/SecureSystem-windows-x64.exe"
 
 build-linux:
-	@echo "Building for Linux..."
-	@mkdir -p bin
-	@GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/remote-desktop-linux-amd64 .
-	@echo "✓ Built: bin/remote-desktop-linux-amd64"
+	@mkdir -p dist
+	@GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o "dist/SecureSystem-linux-x64"      .
+	@GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o "dist/SecureSystem-linux-arm64"    .
+	@echo "Linux: dist/SecureSystem-linux-x64"
+	@echo "Linux: dist/SecureSystem-linux-arm64"
 
-test:
-	@echo "Running tests..."
-	@go test -v ./...
-	@echo "✓ Tests passed"
-
-deps:
-	@echo "Downloading dependencies..."
-	@go mod download
-	@go mod tidy
-	@echo "✓ Dependencies downloaded"
+bundle-mac: build-mac
+	@mkdir -p "dist/Secure System.app/Contents/MacOS"
+	@cp "dist/SecureSystem-mac-arm64" "dist/Secure System.app/Contents/MacOS/Secure System"
+	@chmod +x "dist/Secure System.app/Contents/MacOS/Secure System"
+	@echo '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Secure System</string><key>CFBundleIdentifier</key><string>com.securesystem.remotedesktop</string><key>CFBundleName</key><string>Secure System</string><key>CFBundleVersion</key><string>1.0.0</string><key>CFBundlePackageType</key><string>APPL</string><key>NSHighResolutionCapable</key><true/></dict></plist>' > "dist/Secure System.app/Contents/Info.plist"
+	@echo "Created: dist/Secure System.app"
 
 clean:
-	@echo "Cleaning build artifacts..."
-	@rm -f remote-desktop
-	@rm -rf bin/
-	@go clean
-	@echo "✓ Cleaned"
-
-install: build
-	@echo "Installing..."
-	@cp remote-desktop $(GOPATH)/bin/
-	@echo "✓ Installed to $(GOPATH)/bin/"
-
-.PHONY: run-server run-agent run-viewer
-run-server:
-	./remote-desktop -mode server -host 0.0.0.0 -port 8080
-
-run-agent:
-	./remote-desktop -mode agent -host localhost -port 8080 -agent-id "test-agent"
-
-run-viewer:
-	./remote-desktop -mode viewer -host localhost -port 8080 -agent-id "test-agent"
+	@rm -rf dist/ $(BINARY)
+	@echo "Cleaned"

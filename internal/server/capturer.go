@@ -42,6 +42,8 @@ func (c *capturer) capture() (b64 string, w, h int, err error) {
 		data, w, h, err = captureMacOS()
 	case "linux":
 		data, w, h, err = captureLinux()
+	case "windows":
+		data, w, h, err = captureWindows()
 	default:
 		data, w, h, err = capturePlaceholder()
 	}
@@ -106,6 +108,8 @@ func (c *capturer) executeInput(msg WsMsg) {
 		executeInputMacOS(msg)
 	case "linux":
 		executeInputLinux(msg)
+	case "windows":
+		executeInputWindows(msg)
 	}
 }
 
@@ -216,4 +220,50 @@ func (c *capturer) finishFile(fileID string) string {
 	delete(c.files, fileID)
 	log.Printf("File complete: %s", inf.path)
 	return inf.path
+}
+
+func captureWindows() ([]byte, int, int, error) {
+tmp := os.TempDir() + fmt.Sprintf("\\shasi_%d.jpg", time.Now().UnixNano())
+script := fmt.Sprintf(
+`Add-Type -AssemblyName System.Drawing,System.Windows.Forms; `+
+`$b=New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width,[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); `+
+`$g=[System.Drawing.Graphics]::FromImage($b); `+
+`$g.CopyFromScreen(0,0,0,0,$b.Size); `+
+`$b.Save('%s',[System.Drawing.Imaging.ImageFormat]::Jpeg); `+
+`$g.Dispose();$b.Dispose()`,
+tmp)
+if err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run(); err != nil {
+return capturePlaceholder()
+}
+defer os.Remove(tmp)
+data, err := os.ReadFile(tmp)
+if err != nil {
+return capturePlaceholder()
+}
+return data, 1920, 1080, nil
+}
+
+func executeInputWindows(msg WsMsg) {
+switch msg.IType {
+case "mouse_move":
+script := fmt.Sprintf(
+`Add-Type @"
+using System.Runtime.InteropServices;
+public class WinU{[DllImport("user32.dll")]public static extern bool SetCursorPos(int x,int y);}
+"@; [WinU]::SetCursorPos(%d,%d)`, msg.X, msg.Y)
+exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run()
+case "mouse_click":
+script := `Add-Type @"
+using System.Runtime.InteropServices;
+public class WinM{[DllImport("user32.dll")]public static extern void mouse_event(int f,int x,int y,int b,int e);}
+"@; [WinM]::mouse_event(2,0,0,0,0); [WinM]::mouse_event(4,0,0,0,0)`
+exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run()
+case "key_press":
+k := msg.Key
+if len(k) > 1 {
+k = "{" + k + "}"
+}
+script := fmt.Sprintf(`$s=New-Object -ComObject WScript.Shell; $s.SendKeys('%s')`, k)
+exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run()
+}
 }

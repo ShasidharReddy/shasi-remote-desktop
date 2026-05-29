@@ -1,0 +1,81 @@
+name: Build & Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. v1.0.1)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build all platforms
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Set version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME:-${{ github.event.inputs.version }}}" >> $GITHUB_OUTPUT
+
+      - name: Build all platforms
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          LDFLAGS="-s -w -X main.Version=$VERSION"
+          WIN_LDFLAGS="-s -w -H windowsgui -X main.Version=$VERSION"
+          mkdir -p dist
+
+          echo "Building macOS (ARM64)…"
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-mac-arm64"       .
+
+          echo "Building macOS (Intel)…"
+          GOOS=darwin  GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-mac-intel"      .
+
+          echo "Building Windows x64…"
+          GOOS=windows GOARCH=amd64 go build -ldflags="$WIN_LDFLAGS" -o "dist/SecureSystem-windows-x64.exe" .
+
+          echo "Building Linux x64…"
+          GOOS=linux   GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-linux-x64"      .
+
+          echo "Building Linux ARM64…"
+          GOOS=linux   GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "dist/SecureSystem-linux-arm64"    .
+
+          ls -lh dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Secure System ${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## 🔒 Secure System — Remote Desktop
+
+            ### Download the right file for your OS:
+
+            | Platform | File |
+            |----------|------|
+            | 🍎 macOS Apple Silicon (M1/M2/M3) | `SecureSystem-mac-arm64` |
+            | 🍎 macOS Intel | `SecureSystem-mac-intel` |
+            | 🪟 Windows 64-bit | `SecureSystem-windows-x64.exe` |
+            | 🐧 Linux x64 | `SecureSystem-linux-x64` |
+            | 🐧 Linux ARM64 | `SecureSystem-linux-arm64` |
+
+            ### Quick Start
+            1. Download your OS binary
+            2. **macOS/Linux**: `chmod +x SecureSystem-*` then double-click or run
+            3. **Windows**: double-click `SecureSystem-windows-x64.exe`
+            4. Browser opens automatically → share your Machine ID
+          files: dist/*
+          draft: false
+          prerelease: false
