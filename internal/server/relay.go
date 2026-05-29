@@ -1,7 +1,9 @@
 package server
 
 import (
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync"
@@ -9,6 +11,9 @@ import (
 	"github.com/ShasidharReddy/shasi-remote-desktop/internal/protocol"
 	"github.com/gorilla/websocket"
 )
+
+//go:embed web
+var webFS embed.FS
 
 type Client struct {
 	AgentID string
@@ -37,10 +42,18 @@ func NewRelayServer(addr string) *RelayServer {
 }
 
 func (s *RelayServer) Start() error {
-	http.HandleFunc("/ws", s.handleWS)
-	http.HandleFunc("/status", s.handleStatus)
+	subFS, err := fs.Sub(webFS, "web")
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.Handle("/", http.FileServer(http.FS(subFS)))
+
 	log.Printf("Relay server listening on %s", s.addr)
-	return http.ListenAndServe(s.addr, nil)
+	return http.ListenAndServe(s.addr, mux)
 }
 
 func (s *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
