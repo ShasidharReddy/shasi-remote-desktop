@@ -46,6 +46,8 @@ type WsMsg struct {
 	SessionID  string `json:"session_id,omitempty"`
 	MachineID  string `json:"machine_id,omitempty"`
 	ForSession string `json:"for_session,omitempty"`
+	TargetID   string `json:"target_id,omitempty"`
+	ConnAddr   string `json:"conn_addr,omitempty"` // LAN IP:port sent in welcome
 	FromIP     string `json:"from_ip,omitempty"`
 	Width      int    `json:"width,omitempty"`
 	Height     int    `json:"height,omitempty"`
@@ -86,6 +88,7 @@ type RelayServer struct {
 	host      string
 	port      string
 	machineID string
+	localIP   string
 	sessions  map[string]*session
 	mu        sync.RWMutex
 	upgrader  websocket.Upgrader
@@ -104,6 +107,7 @@ func NewRelayServer(host, port string) *RelayServer {
 		host:      host,
 		port:      port,
 		machineID: loadOrGenMachineID(),
+		localIP:   getLANIP(),
 		sessions:  make(map[string]*session),
 		upgrader:  websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 		cap:       newCapturer(),
@@ -150,11 +154,12 @@ func (s *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
 
-	// greet with machine ID so browser knows which machine it's talking to
+	// greet with machine ID + LAN address so browser knows how to share
 	sess.enqueue(WsMsg{
 		Type:      msgWelcome,
 		SessionID: sess.id,
 		MachineID: s.machineID,
+		ConnAddr:  s.localIP + ":" + s.port,
 	})
 
 	go s.writePump(sess)
@@ -211,6 +216,11 @@ func (s *RelayServer) dispatch(sess *session, msg WsMsg) {
 		log.Printf("Host registered: %s from %s", sess.id, sess.remoteIP)
 
 	case msgViewRequest:
+		// Verify this request is for this machine
+		if msg.TargetID != "" && msg.TargetID != s.machineID {
+			sess.enqueue(WsMsg{Type: msgError, Err: "Machine ID not found on this host"})
+			return
+		}
 		sess.role = "viewer_pending"
 		log.Printf("View request from %s (%s)", sess.id, sess.remoteIP)
 		s.broadcastToHosts(WsMsg{
@@ -400,4 +410,37 @@ func genID(n int) string {
 		b[i] = chars[rand.Intn(len(chars))]
 	}
 	return string(b)
+}
+
+// getLANIP returns the first non-loopback IPv4 address found on the system.
+func getLANIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "localhost"
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				return ip4.String()
+			}
+		}
+	}
+	return "localhost"
 }

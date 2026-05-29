@@ -23,9 +23,9 @@
       <p class="label">Your ID</p>
       <div class="id-box">
         <span id="machine-id">connecting…</span>
-        <button class="btn-icon" onclick="copyID()" title="Copy ID">⧉</button>
+        <button class="btn-icon" onclick="copyID()" title="Copy full connection ID">⧉</button>
       </div>
-      <p class="hint">Share this ID + your IP (<code id="hint-ip"></code>) with the person who wants to connect.</p>
+      <p class="hint">Click ⧉ to copy your <strong>full connection ID</strong> (includes your IP). Share it with the person who wants to connect.</p>
 
       <div class="status-row">
         <span class="dot" id="status-dot"></span>
@@ -41,8 +41,8 @@
       <h2 class="card-title">🔗 Connect to Remote</h2>
       <p class="label">Remote Machine ID</p>
       <input id="remote-id" class="id-input" type="text"
-             placeholder="e.g. 482-751-293" autocomplete="off"/>
-      <p class="hint">Enter the ID shown on the other machine, then click Connect.</p>
+             placeholder="Paste full ID from remote (e.g. 394-840-886@192.168.1.5:8080)" autocomplete="off"/>
+      <p class="hint">Paste the full ID copied from the other machine, then click Connect.</p>
       <button id="connect-btn" class="btn btn-primary" onclick="connectRemote()">
         ▶ Connect
       </button>
